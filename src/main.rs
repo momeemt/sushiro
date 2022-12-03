@@ -1,22 +1,27 @@
 use std::env;
-use std::fs::File;
-use std::io::{Write, BufReader};
 use std::time::SystemTime;
 
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+};
+
+use dotenv::dotenv;
+use rand::prelude::*;
 use rand::rngs::StdRng;
+use rand::seq::IteratorRandom;
 use scraper::ElementRef;
 use scraper::Html;
 use scraper::Selector;
-use serde::{Serialize, Deserialize};
-use serenity::Client;
+use serde::{Deserialize, Serialize};
 use serenity::async_trait;
-use serenity::framework::standard::{StandardFramework, CommandResult};
-use serenity::framework::standard::macros::{group, command};
+use serenity::framework::standard::macros::{command, group};
+use serenity::framework::standard::{CommandResult, StandardFramework};
 use serenity::model::channel::Message;
 use serenity::prelude::*;
-use dotenv::dotenv;
-use rand::{seq::IteratorRandom};
-use rand::prelude::*;
+use serenity::Client;
+
+use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum MenuKind {
@@ -44,18 +49,18 @@ struct Handler;
 impl EventHandler for Handler {}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     dotenv().ok();
     let framework = StandardFramework::new()
         .configure(|c| c.prefix("/"))
         .group(&GENERAL_GROUP);
     let token = env::var("DISCORD_TOKEN").expect("token");
-    let intents = GatewayIntents::non_privileged() |
-                                  GatewayIntents::MESSAGE_CONTENT |
-                                  GatewayIntents::GUILD_PRESENCES |
-                                  GatewayIntents::GUILDS |
-                                  GatewayIntents::GUILD_MEMBERS |
-                                  GatewayIntents::GUILD_MESSAGES;
+    let intents = GatewayIntents::non_privileged()
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_PRESENCES
+        | GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::GUILD_MESSAGES;
     let mut client = Client::builder(token, intents)
         .event_handler(Handler)
         .framework(framework)
@@ -65,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = get_reqwest().await?;
 
     let menus = try_parse_html(&result).unwrap();
-    write_file(menus)?;
+    write_file(menus).await?;
 
     if let Err(why) = client.start().await {
         println!("An error occurred while running the client: {:?}", why);
@@ -74,26 +79,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn write_file(menus: Vec<Menu>) -> std::io::Result<()> {
+async fn write_file(menus: Vec<Menu>) -> Result<()> {
     let serialized: String = serde_json::to_string(&menus)?;
-    let mut file = File::create("menus.json")?;
-    file.write_all(serialized.as_bytes())?;
+    let mut file = File::create("menus.json").await?;
+    file.write_all(serialized.as_bytes()).await?;
     Ok(())
 }
 
-async fn get_reqwest() -> Result<String, Box<dyn std::error::Error>> {
-    let body = reqwest::get("https://www.akindo-sushiro.co.jp/menu/").await?.text().await?;
+async fn get_reqwest() -> Result<String> {
+    let body = reqwest::get("https://www.akindo-sushiro.co.jp/menu/")
+        .await?
+        .text()
+        .await?;
     Ok(body)
 }
 
 fn parse_sushi_category(element: &ElementRef) -> Option<String> {
-    let category_selector = Selector::parse("h3 a").unwrap();
-    Some(element.select(&category_selector).next()?.text().collect::<String>().lines().collect::<String>())
+    let category_selector = Selector::parse("h3 a").ok()?;
+    Some(
+        element
+            .select(&category_selector)
+            .next()?
+            .text()
+            .collect::<String>()
+            .lines()
+            .collect::<String>(),
+    )
 }
 
 fn parse_sushi_name(element: &ElementRef) -> Option<String> {
-    let category_selector = Selector::parse("span.ttl").unwrap();
-    Some(element.select(&category_selector).next()?.text().collect::<String>().lines().collect::<String>())
+    let category_selector = Selector::parse("span.ttl").ok()?;
+    Some(
+        element
+            .select(&category_selector)
+            .next()?
+            .text()
+            .collect::<String>()
+            .lines()
+            .collect::<String>(),
+    )
 }
 
 fn to_menu_kind(category: &str) -> Option<MenuKind> {
@@ -104,11 +128,11 @@ fn to_menu_kind(category: &str) -> Option<MenuKind> {
         "サイドメニュー" => Some(MenuKind::SideMenu),
         "ドリンク" => Some(MenuKind::Drink),
         "デザート" => Some(MenuKind::Desert),
-        _ => None
+        _ => None,
     }
 }
 
-fn try_parse_html(html: &str) -> Option<Vec<Menu>>{
+fn try_parse_html(html: &str) -> Option<Vec<Menu>> {
     let document = Html::parse_document(html);
     let selector_str = ".sec-wrap .c_l-content section";
     let selector = Selector::parse(selector_str).unwrap();
@@ -120,22 +144,21 @@ fn try_parse_html(html: &str) -> Option<Vec<Menu>>{
         let selector = Selector::parse("ul.item-list li a").unwrap();
         for item in element.select(&selector) {
             let name = parse_sushi_name(&item)?;
-            result.push(Menu{
-                kind,
-                name,
-            })
+            result.push(Menu { kind, name })
         }
     }
 
-    return Some(result);
+    Some(result)
 }
 
 #[command]
 async fn roll(ctx: &Context, msg: &Message) -> CommandResult {
     let mut message = String::from("");
-    let file = File::open("menus.json").unwrap();
-    let reader = BufReader::new(file);
-    let deserialized: Vec<Menu> = serde_json::from_reader(reader).unwrap();
+    let file = File::open("menus.json").await?;
+    let mut f = BufReader::new(file);
+    let mut buffer = Vec::new();
+    f.read_to_end(&mut buffer).await?;
+    let deserialized: Vec<Menu> = serde_json::from_str(std::str::from_utf8(&buffer)?).unwrap();
     let guild = ctx.cache.guild(msg.guild_id.unwrap()).unwrap();
     let d = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
