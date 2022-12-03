@@ -1,8 +1,24 @@
+use std::env;
+use std::fs::File;
+use std::io::{Write, BufReader};
+use std::time::SystemTime;
+
+use rand::rngs::StdRng;
 use scraper::ElementRef;
 use scraper::Html;
 use scraper::Selector;
+use serde::{Serialize, Deserialize};
+use serenity::Client;
+use serenity::async_trait;
+use serenity::framework::standard::{StandardFramework, CommandResult};
+use serenity::framework::standard::macros::{group, command};
+use serenity::model::channel::Message;
+use serenity::prelude::*;
+use dotenv::dotenv;
+use rand::{seq::IteratorRandom};
+use rand::prelude::*;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 enum MenuKind {
     LimitedTime, // 期間限定
     Nigiri,
@@ -12,20 +28,56 @@ enum MenuKind {
     Desert,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Menu {
     kind: MenuKind,
     name: String,
 }
 
+#[group]
+#[commands(roll)]
+struct General;
+
+struct Handler;
+
+#[async_trait]
+impl EventHandler for Handler {}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok();
+    let framework = StandardFramework::new()
+        .configure(|c| c.prefix("/"))
+        .group(&GENERAL_GROUP);
+    let token = env::var("DISCORD_TOKEN").expect("token");
+    let intents = GatewayIntents::non_privileged() |
+                                  GatewayIntents::MESSAGE_CONTENT |
+                                  GatewayIntents::GUILD_PRESENCES |
+                                  GatewayIntents::GUILDS |
+                                  GatewayIntents::GUILD_MEMBERS |
+                                  GatewayIntents::GUILD_MESSAGES;
+    let mut client = Client::builder(token, intents)
+        .event_handler(Handler)
+        .framework(framework)
+        .await
+        .expect("Error creating client");
+
     let result = get_reqwest().await?;
-    if let Some(menus) = try_parse_html(&result) {
-        for menu in menus {
-            println!("{:?}", menu)
-        }
+
+    let menus = try_parse_html(&result).unwrap();
+    write_file(menus)?;
+
+    if let Err(why) = client.start().await {
+        println!("An error occurred while running the client: {:?}", why);
     }
+
+    Ok(())
+}
+
+fn write_file(menus: Vec<Menu>) -> std::io::Result<()> {
+    let serialized: String = serde_json::to_string(&menus)?;
+    let mut file = File::create("menus.json")?;
+    file.write_all(serialized.as_bytes())?;
     Ok(())
 }
 
@@ -76,4 +128,25 @@ fn try_parse_html(html: &str) -> Option<Vec<Menu>>{
     }
 
     return Some(result);
+}
+
+#[command]
+async fn roll(ctx: &Context, msg: &Message) -> CommandResult {
+    let mut message = String::from("");
+    let file = File::open("menus.json").unwrap();
+    let reader = BufReader::new(file);
+    let deserialized: Vec<Menu> = serde_json::from_reader(reader).unwrap();
+    let guild = ctx.cache.guild(msg.guild_id.unwrap()).unwrap();
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("Duration since UNIX_EPOCH failed");
+    let mut rng = StdRng::seed_from_u64(d.as_secs());
+    for (_, member) in guild.members {
+        if !member.user.bot {
+            let menu = deserialized.iter().choose_multiple(&mut rng, 1)[0];
+            message += &format!("{}: {}\n", member.display_name(), menu.name);
+        }
+    }
+    msg.reply(ctx, message).await?;
+    Ok(())
 }
