@@ -87,7 +87,7 @@ async fn write_file(menus: Vec<Menu>) -> Result<()> {
 }
 
 async fn get_reqwest() -> Result<String> {
-    let body = reqwest::get("https://www.akindo-sushiro.co.jp/menu/")
+    let body = reqwest::get("https://www.akindo-sushiro.co.jp/menu/menu_detail/?s_id=528")
         .await?
         .text()
         .await?;
